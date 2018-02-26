@@ -30,9 +30,9 @@
  * TODO - advanced stuff later */
 #define MAX_LWQ_SIZE (MAX_PT_POOL_SIZE << 2)
 
-struct pw_pool;
+struct pwp;
 
-typedef int (*pt_worker_fn_t) (int work_code, uint64_t client_info, va_list varp);
+typedef int (*pw_worker_fn_t) (int work_code, uint64_t client_info, va_list varp);
 
 /**
  * work structure used to enqueue/dequeue works for selected work queue
@@ -45,14 +45,14 @@ typedef int (*pt_worker_fn_t) (int work_code, uint64_t client_info, va_list varp
  *                        if >= 0, check work_st_t enum
  *                        if < 0, done & failed - specific to fn why it's failed
  */
-typedef struct pt_work {
+typedef struct pw_work {
 	struct list_head    entry;
 	int                 work_code;
 	va_list             varp;
 	uint64_t            client_info;
-	pt_worker_fn_t      fn;
+	pw_worker_fn_t      fn;
 	int                 status;
-} pt_work_t;
+} pw_work_t;
 
 /**
  * work queue management structure for selected work queue
@@ -72,33 +72,33 @@ typedef struct pt_work {
  * busy_welt_head       - busy work element head in case this's unbound workq
  *                        used by work consumer
  */
-typedef struct pt_workq_t {
-	pt_work_t           *work_arr;
+typedef struct pw_workq_t {
+	pw_work_t           *work_arr;
 	uint32_t            workq_sz;
 	pthread_mutex_t     mutex;
 	pthread_cond_t      cond;
 	int                 cpu_id; //TODO - advanced stuff later; -1 for now
-#define is_pt_workq_bound(pt_wq) (pt_wq->cpu_id != -1)
+#define is_pw_workq_bound(pw_wq) (pw_wq->cpu_id != -1)
 	uint32_t            works_done;
 	union {
 		uint32_t            free_welt_idx; //TODO - advanced stuff later
-		pt_work_t           free_welt_head;
+		pw_work_t           free_welt_head;
 	};
 	union {
 		uint32_t            busy_welt_idx; //TODO - advanced stuff later
-		pt_work_t           busy_welt_head;
+		pw_work_t           busy_welt_head;
 	};
-} pt_workq_t;
+} pw_workq_t;
 
 /* enum to define various states of any worker thread */
-typedef enum pt_state_e {
+typedef enum pw_state_e {
 	PT_INV = 0,
 	PT_FREE,
 	PT_BUSY,
-} pt_state_t;
+} pw_state_t;
 
 /**
- * pt_worker structure definition to hold each worker node details
+ * pw_worker structure definition to hold each worker node details
  * entry                - dlcl list entry linker
  * state                - latest thread state with state machine updates
  * cpu_id               - cpu this queue is bould to;
@@ -109,24 +109,24 @@ typedef enum pt_state_e {
  * l_workq              - work queue array handled by this worker
  *                        if it's bound to same CPU as the work queue
  * g_workq              - global work queue array any worker can get work from
- * parent               - pt_pool to which we belong to
+ * parent               - pw_pool to which we belong to
  * arg                  - this worker ptr for worker to know it's details 
  */
-typedef struct pt_worker_s {
+typedef struct pw_worker_s {
 	struct list_head    entry; //TODO - advanced stuff later
-	pt_state_t          state; //TODO - advanced stuff later
+	pw_state_t          state; //TODO - advanced stuff later
 	int                 cpu_id; //TODO - advanced stuff later; -1 for now
 #define is_worker_bound(w) (w->cpu_id != -1)
 	pthread_t           tid;
 	int                 tidx;
-	pt_workq_t          *l_workq; //TODO - advanced stuff later
-	pt_workq_t          *g_workq;
-	struct pw_pool      *parent;
+	pw_workq_t          *l_workq; //TODO - advanced stuff later
+	pw_workq_t          *g_workq;
+	struct pwp      *parent;
 	void                *arg;
-} pt_worker_t;
+} pw_worker_t;
 
 /**
- * pw_pool ctx structure to hold the pool info
+ * pwp ctx structure to hold the pool info
  * name                 - name of work queue
  * nWorkers             - number of workers to be created 
  * l_workq_sz           - number of works in worker specific bound queue
@@ -134,87 +134,87 @@ typedef struct pt_worker_s {
  * g_workq              - unbound global workq
  * l_workq              - local workq's bound to each thread (and to CPU?)
  * workers              - array of workers moving between free/busy pools
- * pt_free_pool         - dlcl head of free workers pool
- * pt_busy_pool         - dlcl head of busy workers pool
+ * pw_free_pool         - dlcl head of free workers pool
+ * pw_busy_pool         - dlcl head of busy workers pool
  */
-typedef struct pw_pool {
+typedef struct pwp {
 	char                name[32];
 	uint32_t            nWorkers;
 	uint32_t            l_workq_sz;
 	uint32_t            g_workq_sz;
-	pt_workq_t          g_workq;
-	pt_workq_t          *l_workq; //TODO - advanced stuff later; unused for now
-	pt_worker_t         *workers;
-	pt_worker_t         pt_free_pool; //TODO - advanced stuff later
-	pt_worker_t         pt_busy_pool; //TODO - advanced stuff later
+	pw_workq_t          g_workq;
+	pw_workq_t          *l_workq; //TODO - advanced stuff later; unused for now
+	pw_worker_t         *workers;
+	pw_worker_t         pw_free_pool; //TODO - advanced stuff later
+	pw_worker_t         pw_busy_pool; //TODO - advanced stuff later
 } pw_pool_t;
 
 /**
- * @function           : pt_queue_work
+ * @function           : pw_queue_work
  * @brief              : add given work to cpu based bound/unbound workq
  * @input              : pw_pool_t *pq - pointer to pool-workq ctx holder
  *                       int cpu_id - cpu id to select a bound workq
  *                                    TODO: -1 for now
  *                       int work_code - work code for the fn confirm
  *                                       the given work type // TODO
- *                       pt_worker_fn_t fn - function to do specific work
+ *                       pw_worker_fn_t fn - function to do specific work
  *                                           as per work_code
  *                       ... - va_list inputs to process and take action
  * @output             : depends on fn and number/type of outputs in va_list
  * @return             : > 0 on SUCCESS
  *                       < 0 on FAILURE
  */
-int pt_queue_work_on (pw_pool_t *pq, int cpu_id, int work_code, pt_worker_fn_t fn, uint64_t client_info, ...);
+int pw_queue_work_on (pw_pool_t *pq, int cpu_id, int work_code, pw_worker_fn_t fn, uint64_t client_info, ...);
 
 /* queue work as unbound, let it be in global workq.
- * Refer to pt_queue_work_on
+ * Refer to pw_queue_work_on
  * */
-#define pt_queue_work(wc, fn, client, ...) pt_queue_work_on (-1, wc, fn, client, ##__VA_ARGS__)
+#define pw_queue_work(wc, fn, client, ...) pw_queue_work_on (-1, wc, fn, client, ##__VA_ARGS__)
 
 /**
- * @function           : pt_remove_work
+ * @function           : pw_remove_work
  * @brief              :
  * @input              :
  * @output             : none
  * @return             : 0 on SUCCESS
  *                       < 0 on FAILURE
  */
-int pt_remove_work (/*TODO: check use-case & implement later*/);
+int pw_remove_work (/*TODO: check use-case & implement later*/);
 
 /**
- * @function           : pt_check_work_st
+ * @function           : pw_check_work_st
  * @brief              :
  * @input              :
  * @output             : none
  * @return             : 0 on SUCCESS
  *                       < 0 on FAILURE
  */
-int pt_check_work_st (/*TODO: check use-case & implement later*/);
+int pw_check_work_st (/*TODO: check use-case & implement later*/);
 
 
 
 /**
- * @function           : pt_setup_pool
+ * @function           : pw_setup_pool
  * @brief              : setup pthread pool with requested number of pthreads
  * @input              : char *name - name of the context for which
  *                                    workq's and worker pool to be setup
  *                       uint32_t nWorkers - number of worker pthreads
  *                       uint32_t l_workq_sz - works per worker's local workq
  *                       uint32_t g_workq_sz - works in global workq
- * @output             : pw_pool_t *pw_pool - pool holder
+ * @output             : pw_pool_t *pwp - pool holder
  * @return             : 0 on Success
  *                       -errno on Failure
  */
-int pt_setup_pool (char *name, uint32_t nWorkers, uint32_t l_workq_sz, uint32_t g_workq_sz, pw_pool_t *pw_pool);
+int pw_setup_pool (char *name, uint32_t nWorkers, uint32_t l_workq_sz, uint32_t g_workq_sz, pw_pool_t *pwp);
 
 /**
- * @function           : pt_destroy_pool
+ * @function           : pw_destroy_pool
  * @brief              : destroy an already allocated pthread pool
- * @input              : pw_pool_t *pw_pool - pool holder
+ * @input              : pw_pool_t *pwp - pool holder
  * @output             : none
  * @return             : none
  */
-void pt_destroy_pool (pw_pool_t *pw_pool);
+void pw_destroy_pool (pw_pool_t *pwp);
 
 #endif /*__PTWQ_H*/
 
