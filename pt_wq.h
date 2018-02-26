@@ -2,6 +2,8 @@
 #ifndef __PTWQ_H
 #define __PTWQ_H
 
+#define _GNU_SOURCE             /* See feature_test_macros(7) */
+
 #include <stdint.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -11,7 +13,7 @@
 #include "strum.h"
 #include "list.h"
 
-#define PTWQ_SUCCESS 0
+#define PT_SUCCESS 0
 
 /* Max number of worker pthreads allowed to be created suring pool-setup
  * Mind the ceiling value can't be > 128 */
@@ -119,7 +121,7 @@ typedef struct pt_worker_s {
 	int                 tidx;
 	pt_workq_t          *l_workq; //TODO - advanced stuff later
 	pt_workq_t          *g_workq;
-	pw_pool_t           *parent;
+	struct pw_pool      *parent;
 	void                *arg;
 } pt_worker_t;
 
@@ -127,7 +129,8 @@ typedef struct pt_worker_s {
  * pw_pool ctx structure to hold the pool info
  * name                 - name of work queue
  * nWorkers             - number of workers to be created 
- * workq_sz             - number of works in any workq
+ * l_workq_sz           - number of works in worker specific bound queue
+ * g_workq_sz           - number of works in any workq
  * g_workq              - unbound global workq
  * l_workq              - local workq's bound to each thread (and to CPU?)
  * workers              - array of workers moving between free/busy pools
@@ -137,7 +140,8 @@ typedef struct pt_worker_s {
 typedef struct pw_pool {
 	char                name[32];
 	uint32_t            nWorkers;
-	uint32_t            workq_sz;
+	uint32_t            l_workq_sz;
+	uint32_t            g_workq_sz;
 	pt_workq_t          g_workq;
 	pt_workq_t          *l_workq; //TODO - advanced stuff later; unused for now
 	pt_worker_t         *workers;

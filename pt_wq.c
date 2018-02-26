@@ -1,9 +1,16 @@
 
+#define _GNU_SOURCE             /* See feature_test_macros(7) */
+
+#include <string.h>
+#include <errno.h>
+#include <stdlib.h>
+
 #include "pt_wq.h"
 
 /*#include "wlc_log.h"*/
 /* TODO: When integrating to wlc, include wlc_log.h and 
  * remove macro definition below */
+#include <syslog.h>
 #define wlc_log syslog
 
 /**
@@ -20,7 +27,7 @@
  */
 #define pt_assert(lvl, cond, ret, do_this, errstr, ...) \
 	if ((ret = (cond)) != PT_SUCCESS) { \
-		wlc_log (lvl, "%s\n", errstr, ##__VA_ARGS__); \
+		wlc_log (lvl, errstr, ##__VA_ARGS__); \
 		do_this; \
 	}
 
@@ -45,12 +52,12 @@ static inline pt_work_t *_pt_dequeue_wq (pt_workq_t *wq)
 	pt_work_t *w;
 
 	pt_assert_err (pthread_mutex_lock (&wq->mutex) == 0, \
-			ret, return NULL, strerror (errno));
+			ret, return NULL, "wq-mutex: %s", strerror (errno));
 	pt_assert_err (pthread_cond_wait (&wq->cond, &wq->mutex) == 0, \
-			ret, return NULL, strerror (errno));
-	if (!list_empty (&wq->do_work_head)) {
+			ret, return NULL, "wq-cond: %s", strerror (errno));
+	if (!list_empty (&wq->free_welt_head.entry)) {
 		/* dequeue from first as enqueue happens from last */
-		w = list_first_entry (&wq->do_work_head, pt_work_t, entry);
+		w = list_first_entry (&wq->free_welt_head.entry, pt_work_t, entry);
 	}
 	pthread_mutex_unlock (&wq->mutex);
 
@@ -84,20 +91,20 @@ void *pt_worker_thread_fn (void *arg)
 		worker->cpu_id = -1;
 	}
 
-	wlc_log (LOG_NOTICE, "Worker thread started... pthreadid: %u " \
+	wlc_log (LOG_NOTICE, "Worker thread started... pthreadid: %lu " \
 			"cpu: %d worker_idx: %d pool: %s\n", \
 			worker->tid, worker->cpu_id, worker->tidx, worker->parent->name);
 
 	while (1) { /* TODO: do better MnC of all these threads */
 		/*TODO: handle local q also later.. do global workq for now */
 		while ((w = _pt_dequeue_wq (worker->g_workq)) != NULL) {
-			wlc_log (LOG_DEBUG, "thread: %s_%d coudln't get work!");
+			wlc_log (LOG_DEBUG, "thread: %s coudln't get work!", tname);
 		}
 		/* process the work now */
-		w->status = worker->fn (w->work_code, w->client_info, w->varp);
+		w->status = w->fn (w->work_code, w->client_info, w->varp);
 		/* now that the work's handled, move the node to free list */
-		list_del (w);
-		list_add_tail (w, worker->g_workq->free_welt_head);
+		list_del (&w->entry);
+		list_add_tail (&w->entry, &worker->g_workq->free_welt_head.entry);
 	}
 
 	pthread_exit (arg);
@@ -126,14 +133,14 @@ int pt_queue_work_on (pw_pool_t *pq, int cpu_id, int work_code, pt_worker_fn_t f
 	pt_assert_warn (cpu_id != -1, ret, \
 			cpu_id = -1 /*make it -1 for now*/, "Invalid cpu_id: %d", cpu_id);
 
-	wq = pq->g_workq;
+	wq = &pq->g_workq;
 
 	va_start (varp, client_info);
 	pthread_mutex_lock (&wq->mutex);
-	pt_assert_err (!list_empty (wq->free_welt_head), \
+	pt_assert_err (!list_empty (&wq->free_welt_head.entry), \
 			ret, goto release, "No free node to queue work!");
 
-	w = list_first_entry (&wq->free_welt_head, pt_work_t, entry);
+	w = list_first_entry (&wq->free_welt_head.entry, pt_work_t, entry);
 
 	/*Got it! Update workq element with the given details*/
 	w->work_code = work_code;
@@ -142,8 +149,8 @@ int pt_queue_work_on (pw_pool_t *pq, int cpu_id, int work_code, pt_worker_fn_t f
 	w->fn = fn;
 	w->status = 0;
 
-	list_del (w);
-	list_add_tail (w, wq->do_work_head);
+	list_del (&w->entry);
+	list_add_tail (&w->entry, &wq->free_welt_head.entry);
 
 	/*Signal on this wq that new work is available*/
 	pthread_cond_signal (&wq->cond);
@@ -164,7 +171,7 @@ release:
  */
 static inline void __pt_destroy_worker (pt_worker_t *worker)
 {
-	pthread_kill (worker->tid);
+	pthread_kill (worker->tid, SIGKILL);
 
 	memset (worker, 0, sizeof (*worker));
 }
@@ -183,14 +190,14 @@ static inline void _pt_destroy_workers (pw_pool_t *pw_pool)
 	if (!pw_pool->workers) return;
 
 	for (i = 0; i < pw_pool->nWorkers; i++) {
-		__pt_destroy_worker (workers + i);
+		__pt_destroy_worker (pw_pool->workers + i);
 	}
 
 	free (pw_pool->workers);
 }
 
 /**
- * @function           : _pt_destroy_workers
+ * @function           : __pt_destroy_workq
  * @brief              : destroys a workq context in the pool
  * @input              : pt_pool_t *wq - workq context pointer
  * @output             : none
@@ -200,7 +207,7 @@ static inline void __pt_destroy_workq (pt_workq_t *wq)
 {
 	if (!wq) return;
 
-	free (wq->w);
+	free (wq->work_arr);
 	pthread_mutex_destroy (&wq->mutex);
 	pthread_cond_destroy (&wq->cond);
 
@@ -231,19 +238,21 @@ static inline void _pt_destroy_l_workqs (pw_pool_t *pw_pool)
 static inline int _pt_setup_worker (pw_pool_t *pw_pool, int tidx)
 {
 	int ret = 0;
-	pt_worker_t *worker = pw_pool->workers + tidx
+	pt_worker_t *worker = pw_pool->workers + tidx;
 
 	memset (worker, 0, sizeof (*worker));
 
 	worker->cpu_id = -1;
 	worker->tidx = tidx;
 	/*TODO: what about l_workq? later...*/
-	worker->g_workq = pw_pool->g_workq;
+	worker->g_workq = &pw_pool->g_workq;
 	worker->parent = pw_pool;
 	worker->arg = worker;
 
-	pt_assert_err (pthread_create (&worker->tid, NULL), \
-			ret, memset (worker, 0, sizeof (*worker)), strerror (errno));
+	pt_assert_err (pthread_create (&worker->tid, NULL, \
+				pt_worker_thread_fn, worker), \
+			ret, memset (worker, 0, sizeof (*worker)), \
+			"pthread: %s", strerror (errno));
 
 	return ret;
 }
@@ -257,7 +266,7 @@ static inline int _pt_setup_worker (pw_pool_t *pw_pool, int tidx)
  * @return             : 0 for SUCCESS
  *                       < 0 for FAILURE
  */
-static inline int __pt_setup_workq (pt_workq_t *wq, pw_pool_t *pw_pool, uint32_t workq_sz);
+static inline int __pt_setup_workq (pt_workq_t *wq, pw_pool_t *pw_pool, uint32_t workq_sz)
 {
 	int ret = 0;
 	int i = 0;
@@ -265,21 +274,22 @@ static inline int __pt_setup_workq (pt_workq_t *wq, pw_pool_t *pw_pool, uint32_t
 	struct list_head *head;
 
 	pt_assert_err (pthread_cond_init (&wq->cond, NULL), \
-			ret, return ret, strerror (errno));
+			ret, return ret, "wq-cond: %s", strerror (errno));
 
 	pt_assert_err (pthread_mutex_init (&wq->mutex, NULL), \
-			ret, goto clean_cond, strerror (errno));
+			ret, goto clean_cond, "wq-mutex: %s", strerror (errno));
 
 	w = calloc (workq_sz, sizeof (*w));
-	pt_assert_err (w != NULL, ret, goto clean_mutex, strerror (errno));
+	pt_assert_err (w != NULL, ret, goto clean_mutex, \
+			"calloc w: %s", strerror (errno));
 	wq->work_arr = w;
-	head = &wq->free_welt_head;
+	head = &wq->free_welt_head.entry;
 	INIT_LIST_HEAD (head);
 	for (i = 0; i < workq_sz; i++) {
-		list_add_tail (&w[i]->entry, head);
+		list_add_tail (&w[i].entry, head);
 	}
 
-	INIT_LIST_HEAD (&wq->busy_welt_head);
+	INIT_LIST_HEAD (&wq->busy_welt_head.entry);
 
 	wq->cpu_id = -1;
 	wq->works_done = 0;
@@ -296,7 +306,7 @@ clean_cond:
 }
 
 /**
- * @function           : _pt_setup_l_workq
+ * @function           : _pt_setup_l_workqs
  * @brief              : later
  * @input              : pw_pool_t *pw_pool - to link with parent
  *                       uint32_t workq_sz - number of work elements in queue
@@ -304,16 +314,18 @@ clean_cond:
  * @return             : 0 for SUCCESS
  *                       < 0 for FAILURE
  */
-static inline int _pt_setup_l_workq (pw_pool_t *pw_pool, uint32_t workq_sz)
+static inline int _pt_setup_l_workqs (pw_pool_t *pw_pool, uint32_t workq_sz)
 {
 	int ret = 0;
 	/*TODO: return 0 as l_workq is not used elsewhere now*/
 	return ret;
 }
 
-int pt_setup_pool (char *name, uint32_t nWorkers, uint32_t l_workq_sz, uint32_t workq_sz, pw_pool_t *pw_pool)
+int pt_setup_pool (char *name, uint32_t nWorkers, uint32_t l_workq_sz, uint32_t g_workq_sz, pw_pool_t *pw_pool)
 {
 	int ret = 0;
+	int i = 0;
+	pt_worker_t *workers;
 
 	pt_assert_err ((!name || !strlen(name)), \
 			ret, return ret, "Need valid pool name");
@@ -338,11 +350,11 @@ int pt_setup_pool (char *name, uint32_t nWorkers, uint32_t l_workq_sz, uint32_t 
 	pt_assert_err (__pt_setup_workq (&pw_pool->g_workq, pw_pool, g_workq_sz), \
 			ret, goto release_pw, "Failed g_workq setup!");
 	pw_pool->l_workq_sz = l_workq_sz;
-	pt_assert_err (_pt_setup_l_workqs (pw_pool), \
+	pt_assert_err (_pt_setup_l_workqs (pw_pool, l_workq_sz), \
 			ret, goto release_pw, "Failed l_workqs setup!");
 	
 	pw_pool->nWorkers = nWorkers;
-	workers = malloc (nWorkers, sizeof (*workers));
+	workers = malloc (nWorkers * sizeof (*workers));
 	pt_assert_err ((workers != NULL), ret, goto release_pw, \
 			"malloc %d workers for %s: %s", nWorkers, name, strerror (errno));
 	pw_pool->workers = workers;
@@ -363,7 +375,7 @@ release_pw:
 void pt_destroy_pool (pw_pool_t *pw_pool)
 {
 	_pt_destroy_workers (pw_pool);
-	__pt_destroy_workq (pw_pool->g_workq, pw_pool);
+	__pt_destroy_workq (&pw_pool->g_workq);
 	_pt_destroy_l_workqs (pw_pool);
 	memset (pw_pool, 0, sizeof (*pw_pool));
 }
