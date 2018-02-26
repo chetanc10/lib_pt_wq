@@ -5,7 +5,7 @@
 #include <errno.h>
 #include <stdlib.h>
 
-#include "pwq.h"
+#include "pwq_lib.h"
 
 /*#include "wlc_log.h"*/
 /* TODO: When integrating to wlc, include wlc_log.h and 
