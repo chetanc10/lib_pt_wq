@@ -14,6 +14,41 @@
 #include "list.h"
 
 #define PT_SUCCESS 0
+#define pt_true 1
+#define pt_false 0
+
+#include <syslog.h>
+
+#if 0
+#define logger syslog
+#else
+#define logger(lvl, fmt, ...) printf (fmt, ##__VA_ARGS__)
+#endif
+
+/**
+ * @function           : pw_assert
+ * @brief              : test a cond for pt_true case and if failure,
+ *                       do_this action and print errstr
+ * @input              : lvl - syslog level as specific by caller
+ *                       expected - 0 for success or non-zero for failure
+ *                       ret - return value holder
+ *                       do_this - action to be taken for failure case
+ *                       (errstr, ...) - err string like we use for printf
+ * @output             : none
+ * @return             : none
+ */
+#define pw_assert(lvl, expected, ret, do_this, errstr, ...) \
+	if ((expected) != pt_true) { \
+		logger (lvl, errstr"\n", ##__VA_ARGS__); \
+		ret = !expected; \
+		do_this; \
+	}
+
+/* WARNING and ERR for syslog. Refer pw_assert for more */
+#define pw_assert_warn(expected, ret, do_this, errstr, ...) \
+	pw_assert (LOG_WARNING, expected, ret, do_this, errstr, ##__VA_ARGS__)
+#define pw_assert_err(expected, ret, do_this, errstr, ...) \
+	pw_assert (LOG_ERR, expected, ret, do_this, errstr, ##__VA_ARGS__)
 
 /* Max number of worker pthreads allowed to be created suring pool-setup
  * Mind the ceiling value can't be > 128 */
@@ -32,23 +67,21 @@
 
 struct pwp;
 
-typedef int (*pw_worker_fn_t) (int work_code, uint64_t client_info, va_list varp);
+typedef int (*pw_worker_fn_t) (uint64_t client_info, uint64_t arg);
 
 /**
  * work structure used to enqueue/dequeue works for selected work queue
  * entry                - dlcl list entry linker
- * work_code            - defined by application and known to fn to do some work
  * fn                   - function ptr to handle the work
  * client_info          - client info as pointer, sock-id, msg-qid, etc
- * varp                 - va_list type of argument pointer list
+ * arg                  - argument 
  * status               - work status - waiting/executing/done/failure/etc
  *                        if >= 0, check work_st_t enum
  *                        if < 0, done & failed - specific to fn why it's failed
  */
 typedef struct pw_work {
 	struct list_head    entry;
-	int                 work_code;
-	va_list             varp;
+	uint64_t            arg;
 	uint64_t            client_info;
 	pw_worker_fn_t      fn;
 	int                 status;
@@ -73,6 +106,7 @@ typedef struct pw_work {
  *                        used by work consumer
  */
 typedef struct pw_workq_t {
+	char                qname[32];
 	pw_work_t           *work_arr;
 	uint32_t            workq_sz;
 	pthread_mutex_t     mutex;
@@ -115,6 +149,7 @@ typedef enum pw_state_e {
 typedef struct pw_worker_s {
 	struct list_head    entry; //TODO - advanced stuff later
 	pw_state_t          state; //TODO - advanced stuff later
+	char                tname[32];
 	int                 cpu_id; //TODO - advanced stuff later; -1 for now
 #define is_worker_bound(w) (w->cpu_id != -1)
 	pthread_t           tid;
@@ -150,26 +185,25 @@ typedef struct pwp {
 } pw_pool_t;
 
 /**
- * @function           : pw_queue_work
+ * @function           : pw_queue_work_on
  * @brief              : add given work to cpu based bound/unbound workq
  * @input              : pw_pool_t *pq - pointer to pool-workq ctx holder
  *                       int cpu_id - cpu id to select a bound workq
  *                                    TODO: -1 for now
- *                       int work_code - work code for the fn confirm
- *                                       the given work type // TODO
  *                       pw_worker_fn_t fn - function to do specific work
- *                                           as per work_code
- *                       ... - va_list inputs to process and take action
+ *                       uint64_t arg - typecasted argument (pointer/int/float,etc)
+ *                       XXX WARNING: if sizeof (data_param) > 8,
+ *                                    MUST use it's address
  * @output             : depends on fn and number/type of outputs in va_list
  * @return             : > 0 on SUCCESS
  *                       < 0 on FAILURE
  */
-int pw_queue_work_on (pw_pool_t *pq, int cpu_id, int work_code, pw_worker_fn_t fn, uint64_t client_info, ...);
+int pw_queue_work_on (pw_pool_t *pq, int cpu_id, pw_worker_fn_t fn, uint64_t client_info, uint64_t arg);
 
 /* queue work as unbound, let it be in global workq.
  * Refer to pw_queue_work_on
  * */
-#define pw_queue_work(wc, fn, client, ...) pw_queue_work_on (-1, wc, fn, client, ##__VA_ARGS__)
+#define pw_queue_work(pwp, fn, client, arg) pw_queue_work_on (pwp, -1, fn, client, arg)
 
 /**
  * @function           : pw_remove_work
