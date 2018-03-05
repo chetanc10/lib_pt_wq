@@ -201,7 +201,8 @@ typedef struct pwp {
 int pw_queue_work_on (pw_pool_t *pq, int cpu_id, pw_worker_fn_t fn, uint64_t client_info, uint64_t arg);
 
 /* queue work as unbound, let it be in global workq.
- * Refer to pw_queue_work_on
+ * This is most used API to queue work without worrying about CPU affinities
+ * Refer to pw_queue_work_on for further details.
  * */
 #define pw_queue_work(pwp, fn, client, arg) pw_queue_work_on (pwp, -1, fn, client, arg)
 
