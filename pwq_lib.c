@@ -37,7 +37,7 @@ static inline pw_work_t *_pw_dequeue_wq (pw_workq_t *wq, pw_worker_t *worker)
 err_ret:
 	pthread_mutex_unlock (&wq->mutex);
 
-	return w;
+	return (ret == 0) ? w : NULL;
 }
 
 /**

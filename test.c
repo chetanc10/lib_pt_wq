@@ -23,7 +23,7 @@ int sleeper_cell_work (uint64_t client_info, uint64_t arg)
 	return ret;
 }
 
-int main (int **argc, char **argv)
+int main (int argc, char **argv)
 {
 	int ret = 0;
 	char choice;
