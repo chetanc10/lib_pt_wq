@@ -40,7 +40,7 @@
 #define pw_assert(lvl, expected, ret, do_this, errstr, ...) \
 	if ((expected) != pt_true) { \
 		logger (lvl, errstr"\n", ##__VA_ARGS__); \
-		ret = !expected; \
+		ret = !(expected); \
 		do_this; \
 	}
 
