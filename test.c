@@ -34,7 +34,8 @@ int main (int argc, char **argv)
 	pw_assert_err (ret == 0, ret, return ret, \
 			"Unable to setup %s\n", "test_pwq");
 
-	printf ("enter value in range 1-10 to start sleeper-work for that many seconds; 0 to exit");
+	printf ("enter value in range 1-10 to start \
+			sleeper-work for that many seconds; 0 to exit");
 	while (alive) {
 		printf ("\npwq > ");
 		while (scanf (" %c", &choice) != 1) {
@@ -51,7 +52,8 @@ int main (int argc, char **argv)
 					printf ("allowed range: 0 to 9\n");
 					break;
 				}
-				ret = pw_queue_work (&pwp, sleeper_cell_work, /*client_info*/choice - '0', choice - '0');
+				ret = pw_queue_work (&pwp, sleeper_cell_work, \
+						/*client_info*/choice - '0', /*data to process*/choice - '0');
 				pw_assert_warn (ret == 0, ret, ret = 0, \
 						"Couldn't activate sleeper_cell for operation: %d", choice);
 				break;
@@ -59,3 +61,4 @@ int main (int argc, char **argv)
 	}
 	return ret;
 }
+
